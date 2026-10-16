@@ -26,7 +26,7 @@ DEFAULT_FIT_PARAMS = [
     "mouth-lowerlip-height-decr-incr", "mouth-upperlip-width-decr-incr", "mouth-lowerlip-width-decr-incr",
     "mouth-angles-down-up", "mouth-cupidsbow-decr-incr",
     "cheek-volume-decr-incr", "cheek-bones-decr-incr", "cheek-inner-decr-incr", "forehead-scale-vert-decr-incr",
-    "forehead-temple-decr-incr", "neck-scale-horiz-decr-incr",
+    "forehead-temple-decr-incr",
 ]
 # depth sliders, only constrained when MediaPipe z (depth_weight > 0) is used
 DEPTH_FIT_PARAMS = [

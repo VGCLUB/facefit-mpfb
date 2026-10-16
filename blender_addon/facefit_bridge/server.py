@@ -26,6 +26,14 @@ COMMANDS = {
     "uv_projection_data": lambda path, res=768: (core.setup_camera(res=res), core.uv_projection_data(path))[1],
     "apply_textures": lambda albedo, eyes_albedo=None: core.apply_textures(albedo, eyes_albedo),
     "render_textured": lambda path, res=768, yaw_deg=0.0, samples=48: core.render_textured(path, res, yaw_deg, samples),
+    "set_macros": lambda values: core.set_macros(values),
+    "mesh_dump": lambda path: core.mesh_dump(path),
+    "set_delta_key": lambda name, npy_path, value=1.0: core.set_delta_key(name, npy_path, value),
+    "set_key_values": lambda values: core.set_key_values(values),
+    "remove_keys": lambda prefix: core.remove_keys(prefix),
+    "setup_face_projection": lambda npz_path, photo_path, body_albedo=None: core.setup_face_projection(npz_path, photo_path, body_albedo),
+    "make_hair_cap": lambda npz_path: core.make_hair_cap(npz_path),
+    "apply_eye_texture": lambda path: core.apply_eye_texture(path),
     "export_model": lambda path, fmt="glb": core.export_model(path, fmt),
 }
 

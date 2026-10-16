@@ -466,3 +466,168 @@ def render_textured(path, res=768, yaw_deg=0.0, samples=48, engine="CYCLES"):
     bpy.ops.render.render(write_still=True)
     setup_camera(h, res=res)  # restore front camera for projections
     return path
+
+
+# ================================================================ phase 3: macros, per-vertex refine keys, camera-projected face material, hair cap
+def set_macros(values):
+    """values: dict of MPFB macro names (gender, age, muscle, weight, height, proportions, african, asian, caucasian, ...) 0..1."""
+    M = mpfb(); h = get_human(); HOP = M["HumanObjectProperties"]
+    for k, v in values.items():
+        HOP.set_value(k, float(v), entity_reference=h)
+    M["TargetService"].reapply_macro_details(h)
+    if "facefit_top" in h: del h["facefit_top"]       # re-frame camera for the new body height
+    return {k: HOP.get_value(k, entity_reference=h) for k in values}
+
+
+def mesh_dump(path):
+    h = get_human()
+    co = evaluated_coords(h)
+    me = h.data; me.calc_loop_triangles()
+    nt = len(me.loop_triangles)
+    tv = np.empty(nt * 3, np.int64); me.loop_triangles.foreach_get("vertices", tv); tv = tv.reshape(-1, 3)
+    a, b, c = co[tv[:, 0]], co[tv[:, 1]], co[tv[:, 2]]
+    fn = np.cross(b - a, c - a); vn = np.zeros_like(co)
+    for k in range(3): np.add.at(vn, tv[:, k], fn)
+    vn /= np.linalg.norm(vn, axis=1, keepdims=True) + 1e-12
+    helper = np.zeros(len(co), bool)
+    g = h.vertex_groups.get("HelperGeometry")
+    if g:
+        for v in me.vertices:
+            if any(e.group == g.index for e in v.groups): helper[v.index] = True
+    kbs = me.shape_keys.key_blocks
+    basis = np.empty(len(co) * 3, np.float32); kbs[0].data.foreach_get("co", basis)
+    np.savez_compressed(path, co=co, normals=vn, helper=helper, tris=tv, basis=basis.reshape(-1, 3),
+                        top=float(h["facefit_top"]) if "facefit_top" in h else float(co[:, 2].max()))
+    return path
+
+
+def set_delta_key(name, npy_path, value=1.0):
+    """Create/replace a relative shape key = Basis + delta (delta: (N,3) .npy in object space)."""
+    h = get_human()
+    d = np.load(npy_path).astype(np.float32)
+    kbs = h.data.shape_keys.key_blocks
+    sk = kbs.get(name) or h.shape_key_add(name=name, from_mix=False)
+    basis = np.empty(len(h.data.vertices) * 3, np.float32); kbs[0].data.foreach_get("co", basis)
+    sk.data.foreach_set("co", (basis.reshape(-1, 3) + d).ravel())
+    sk.slider_min, sk.slider_max = -1.0, 2.0
+    sk.value = float(value)
+    h.data.update()
+    return name
+
+
+def set_key_values(values):
+    kbs = get_human().data.shape_keys.key_blocks
+    for k, v in values.items():
+        if k in kbs: kbs[k].value = float(v)
+    return {k: kbs[k].value for k in values if k in kbs}
+
+
+def remove_keys(prefix):
+    h = get_human(); n = 0
+    for k in list(h.data.shape_keys.key_blocks):
+        if k.name.startswith(prefix): h.shape_key_remove(k); n += 1
+    return n
+
+
+def setup_face_projection(npz_path, photo_path, body_albedo=None):
+    """Material = mix(body skin colour/albedo via MPFB UV, cleaned photo via per-vertex camera-projection UV, by vertex mask)."""
+    h = get_human(); me = h.data
+    d = np.load(npz_path)
+    puv, mask = d["proj_uv"], d["mask"]          # per vertex
+    vidx = np.empty(len(me.loops), np.int64); me.loops.foreach_get("vertex_index", vidx)
+    uvl = me.uv_layers.get("facefit_proj") or me.uv_layers.new(name="facefit_proj")
+    uvl.data.foreach_set("uv", puv[vidx].astype(np.float32).ravel())
+    ca = me.color_attributes.get("facefit_mask") or me.color_attributes.new("facefit_mask", "FLOAT_COLOR", "POINT")
+    col = np.repeat(mask[:, None], 4, 1).astype(np.float32); col[:, 3] = 1
+    ca.data.foreach_set("color", col.ravel())
+    base_uv = me.uv_layers[0].name
+    m = bpy.data.materials.get("facefit_face") or bpy.data.materials.new("facefit_face")
+    m.use_nodes = True; nt = m.node_tree
+    for n in list(nt.nodes): nt.nodes.remove(n)
+    N = nt.nodes.new; L = nt.links.new
+    out = N("ShaderNodeOutputMaterial"); bsdf = N("ShaderNodeBsdfPrincipled")
+    uvp = N("ShaderNodeUVMap"); uvp.uv_map = "facefit_proj"
+    tp = N("ShaderNodeTexImage"); tp.image = bpy.data.images.load(photo_path, check_existing=False); tp.extension = "EXTEND"
+    L(uvp.outputs["UV"], tp.inputs["Vector"])
+    attr = N("ShaderNodeAttribute"); attr.attribute_name = "facefit_mask"
+    mix = N("ShaderNodeMix"); mix.data_type = "RGBA"
+    if body_albedo:
+        uvb = N("ShaderNodeUVMap"); uvb.uv_map = base_uv
+        tb = N("ShaderNodeTexImage"); tb.image = bpy.data.images.load(body_albedo, check_existing=False)
+        L(uvb.outputs["UV"], tb.inputs["Vector"]); L(tb.outputs["Color"], mix.inputs[6])
+    else:
+        mix.inputs[6].default_value = tuple(list(d["skin_rgb"]) + [1.0])
+    L(attr.outputs["Fac"], mix.inputs["Factor"]); L(tp.outputs["Color"], mix.inputs[7])
+    # hair-coloured scalp under the hair cap
+    if "hair" in d.files:
+        hc = me.color_attributes.get("facefit_hair") or me.color_attributes.new("facefit_hair", "FLOAT_COLOR", "POINT")
+        hv = np.repeat(d["hair"].astype(np.float32)[:, None], 4, 1); hv[:, 3] = 1
+        hc.data.foreach_set("color", hv.ravel())
+        ah = N("ShaderNodeAttribute"); ah.attribute_name = "facefit_hair"
+        mh = N("ShaderNodeMix"); mh.data_type = "RGBA"; mh.inputs[7].default_value = (0.02, 0.014, 0.012, 1)
+        L(ah.outputs["Fac"], mh.inputs["Factor"]); L(mix.outputs[2], mh.inputs[6])
+        L(mh.outputs[2], bsdf.inputs["Base Color"])
+    else:
+        L(mix.outputs[2], bsdf.inputs["Base Color"])
+    L(bsdf.outputs["BSDF"], out.inputs["Surface"])
+    bsdf.inputs["Roughness"].default_value = 0.45
+    if "Subsurface Weight" in bsdf.inputs:
+        bsdf.inputs["Subsurface Weight"].default_value = 0.2
+        bsdf.inputs["Subsurface Radius"].default_value = (0.01, 0.004, 0.002); bsdf.inputs["Subsurface Scale"].default_value = 0.01
+    me.materials.clear(); me.materials.append(m)
+    for p in me.polygons: p.material_index = 0
+    return True
+
+
+def make_hair_cap(npz_path, color=(0.025, 0.017, 0.014), offset=0.007, name="FaceFitHairCap", long_hair=0.30, steps=6):
+    """Simple hair shell: copy of head faces whose vertices are flagged in npz['hair'] pushed out along normals."""
+    import bmesh
+    h = get_human(); d = np.load(npz_path); hair = d["hair"] > 0.5; nrm = d["normals"]; co = d["co"]
+    old = bpy.data.objects.get(name)
+    if old: bpy.data.objects.remove(old)
+    tris = d["tris"]; keep = hair[tris].all(1)
+    used = np.unique(tris[keep]); remap = -np.ones(len(co), np.int64); remap[used] = np.arange(len(used))
+    verts = co[used] + nrm[used] * offset
+    me = bpy.data.meshes.new(name); me.from_pydata(verts.tolist(), [], remap[tris[keep]].tolist()); me.update()
+    if long_hair > 0:   # extrude the lower side/back boundary of the cap downwards into simple hair "curtains"
+        bm = bmesh.new(); bm.from_mesh(me)
+        top = float(np.max(verts[:, 2]))
+        edges = [e for e in bm.edges if e.is_boundary and all(v.co.z < top - 0.06 for v in e.verts)
+                 and all(v.co.y > -0.075 for v in e.verts)]
+        geom = bmesh.ops.extrude_edge_only(bm, edges=edges)["geom"]
+        newv = [g for g in geom if isinstance(g, bmesh.types.BMVert)]
+        for k in range(1, steps + 1):
+            for v in newv:
+                v.co.z -= long_hair / steps
+                flare = 1.0 + 0.04 / steps
+                v.co.x *= flare
+            if k < steps:
+                geom = bmesh.ops.extrude_vert_indiv if False else None
+                e2 = list({e for v in newv for e in v.link_edges if e.is_boundary and all(w in newv for w in e.verts)})
+                g2 = bmesh.ops.extrude_edge_only(bm, edges=e2)["geom"]
+                newv = [g for g in g2 if isinstance(g, bmesh.types.BMVert)]
+        bm.to_mesh(me); bm.free()
+    for p in me.polygons: p.use_smooth = True
+    o = bpy.data.objects.new(name, me); bpy.context.scene.collection.objects.link(o)
+    sol = o.modifiers.new("thick", "SOLIDIFY"); sol.thickness = 0.004
+    sub = o.modifiers.new("sub", "SUBSURF"); sub.levels = 1; sub.render_levels = 1
+    m = bpy.data.materials.get("facefit_hair") or bpy.data.materials.new("facefit_hair")
+    m.use_nodes = True; b = m.node_tree.nodes.get("Principled BSDF")
+    b.inputs["Base Color"].default_value = (*color, 1); b.inputs["Roughness"].default_value = 0.35
+    if "Coat Weight" in b.inputs: b.inputs["Coat Weight"].default_value = 0.3
+    me.materials.append(m)
+    return {"faces": int(keep.sum())}
+
+
+def apply_eye_texture(path):
+    h = get_human()
+    for o in _eyes_objects(h):
+        m = bpy.data.materials.get("facefit_eyes") or bpy.data.materials.new("facefit_eyes")
+        m.use_nodes = True; nt = m.node_tree
+        for n in list(nt.nodes): nt.nodes.remove(n)
+        out = nt.nodes.new("ShaderNodeOutputMaterial"); b = nt.nodes.new("ShaderNodeBsdfPrincipled")
+        t = nt.nodes.new("ShaderNodeTexImage"); t.image = bpy.data.images.load(path, check_existing=False)
+        nt.links.new(t.outputs["Color"], b.inputs["Base Color"]); nt.links.new(t.outputs["Alpha"], b.inputs["Alpha"])
+        nt.links.new(b.outputs["BSDF"], out.inputs["Surface"]); b.inputs["Roughness"].default_value = 0.15
+        o.data.materials.clear(); o.data.materials.append(m)
+    return True

@@ -64,6 +64,24 @@ Stylisation: `auto_fit(style={"eye-scale-decr-incr": 0.2, "chin-triangle": 0.4})
 | 2D RMS %IOD | 5.49 | 3.07 | 3.05 |
 | depth RMS %IOD (vs MediaPipe z) | 16.0 | 15.5 | 14.4 |
 
+## Phase 3 (v0.3): likeness
+`scripts/e2e_v3.py` runs the full chain. The same chain over MCP is `auto_fit(fit_macros=True, vertex_refine=True)` → `project_face_photo()` → `render_textured()`.
+1. **Macro search**: tries female, age 25 presets with Asian ratio and proportions variants, and keeps the one with the lowest landmark error.
+2. **Slider fit**: 2D landmarks plus MediaPipe depth, as in v0.2.
+3. **Vertex refine**: shape key `facefit_refine`, a thin-plate RBF in the front plane. Its controls are the 57 landmark vertices plus about 22 lower-face silhouette vertices matched to the BiSeNet face-mask outline. Neck, back-of-head and skull-top anchors hold the rest in place. The result is mirror-symmetrised, and two passes are run.
+4. **Style keys** `style_big_eyes`, `style_small_nose`, `style_full_lips`, `style_v_chin` are set with `set_style`.
+5. **Face texture**: the cleaned photo is camera-projected through a dedicated per-vertex UV (`facefit_proj`), so it keeps the photo's native resolution. The cleaning step inpaints parsed hair, earrings, thin strands and the outline band, then applies mild LAB low-frequency de-lighting. The projection is feathered into the body skin colour by a visibility × face-mask attribute.
+6. **Eyes and hair**: MakeHuman eyes with the iris recoloured to match the reference, and a simple hair cap with extruded side curtains.
+
+| test image | 2D RMS %IOD |
+|---|---|
+| default MPFB head | 5.49 |
+| female macros + sliders | 2.95 |
+| + vertex refine | 1.36 |
+| MediaPipe re-run on textured v3 front render | 1.32 |
+
+The textured-render check is biased, because the texture is the photo itself.
+
 ## Limitations / TODO
 - Depth only comes from MediaPipe's monocular z, which is weak on stylised CG faces, so the gain is small (16.0→14.4 %IOD). A profile reference or a 3D face prior would do better.
 - Correspondences come from MediaPipe run on a clay render of the default MPFB head (about 4 px reprojection error at 1024 px). Jaw-contour points are silhouette-dependent and only approximate.

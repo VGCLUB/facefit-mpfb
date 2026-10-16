@@ -75,7 +75,9 @@ class FaceFitSession:
         self.saved[name] = vals
         path = path or os.path.join(self.workdir, f"state_{name}.json")
         json.dump(dict(parameters=vals, reference=self.ref_image), open(path, "w"), indent=1)
-        return dict(name=name, path=path)
+        blend = path.replace(".json", ".blend")          # full scene incl. macros, refine/style keys, materials
+        self.bl.call("save_blend", path=blend)
+        return dict(name=name, path=path, blend=blend)
 
     def load_state(self, name="default", path=None):
         vals = self.saved.get(name) if path is None else json.load(open(path))["parameters"]
@@ -194,6 +196,93 @@ class FaceFitSession:
 
     def render_textured(self, path, yaw_deg=0.0, res=768, samples=48):
         return dict(path=self.bl.call("render_textured", path=os.path.abspath(path), res=res, yaw_deg=yaw_deg, samples=samples))
+
+    # ---------------- phase 3
+    def dump(self):
+        path = os.path.join(self.workdir, "mesh_dump.npz")
+        self.bl.call("mesh_dump", path=path); return dict(np.load(path))
+
+    def T_model_to_ref(self):
+        V = np.array(self.bl.call("vertex_coords", vertex_ids=self.vids))
+        return F.umeyama2d(F.project(V), self.ref2d(), self.weights)
+
+    def labels(self):
+        if getattr(self, "_labels", None) is None or self._labels_for != self.ref_image:
+            import cv2
+            from . import parsing
+            self._labels = parsing.parse(cv2.imread(self.ref_image), self.ref["landmarks_px"]); self._labels_for = self.ref_image
+        return self._labels
+
+    def fit_macros(self, candidates=None, depth_weight=0.3):
+        """Try a few MPFB macro presets (female/young first), fit sliders for each, keep the best 2D error."""
+        candidates = candidates or [dict(gender=0.0, age=0.5, asian=a, proportions=p, weight=w)
+                                    for a in (0.5, 1.0) for p in (0.5, 1.0) for w in (0.5,)]
+        res = []
+        for c in candidates:
+            mac = dict(c); a = mac.pop("asian", None)
+            if a is not None: mac.update(asian=a, caucasian=(1 - a) / 2, african=(1 - a) / 2)
+            self.bl.call("set_macros", values=mac); self.bl.call("reset_parameters")
+            r = self.auto_fit(depth_weight=depth_weight)
+            res.append((r["error_after"]["rms_iod_pct"], c))
+        best = min(res, key=lambda x: x[0])[1]
+        mac = dict(best); a = mac.pop("asian", None)
+        if a is not None: mac.update(asian=a, caucasian=(1 - a) / 2, african=(1 - a) / 2)
+        self.bl.call("set_macros", values=mac); self.bl.call("reset_parameters")
+        fit = self.auto_fit(depth_weight=depth_weight)
+        return dict(best=best, tried=[dict(err=e, **c) for e, c in res], fit_error=fit["error_after"])
+
+    def vertex_refine(self, passes=2, strength=1.0, contour=True):
+        """Per-vertex smooth symmetric deformation (shape key 'facefit_refine') to match landmarks + parsed jaw contour."""
+        from . import refine as R
+        self.push_undo()
+        self.bl.call("remove_keys", prefix="facefit_refine")
+        before = self.get_landmark_error()
+        total = None; infos = []
+        npy = os.path.join(self.workdir, "refine_delta.npy")
+        for k in range(passes):
+            d = self.dump()
+            delta, info = R.compute_refine(d, self.vids, self.ref2d(), self.T_model_to_ref(), self.labels(),
+                                           np.array(self.ref["landmarks_px"]), strength=strength, contour=contour)
+            total = delta if total is None else total + delta
+            np.save(npy, total); self.bl.call("set_delta_key", name="facefit_refine", npy_path=npy, value=1.0)
+            infos.append(info)
+        after = self.get_landmark_error()
+        return dict(error_before=before, error_after=after, passes=infos)
+
+    def add_style_keys(self):
+        d = self.dump(); co = d["basis"]
+        ids = {m: v for m, v in zip(self.mp_ids, self.vids)}
+        c = lambda *ms: co[[ids[m] for m in ms]].mean(0)
+        sd = __import__("facefit.v3", fromlist=["x"]).style_deltas(
+            d, [c(33, 133, 160, 144), c(263, 362, 387, 373)], c(61, 291, 0, 17), c(1, 98, 327), co[ids[152]])
+        for name, delta in sd.items():
+            p = os.path.join(self.workdir, f"{name}.npy"); np.save(p, delta)
+            self.bl.call("set_delta_key", name=name, npy_path=p, value=0.0)
+        return list(sd)
+
+    def set_style(self, values):
+        """values: {style_big_eyes, style_small_nose, style_full_lips, style_v_chin: 0..1.5}"""
+        return self.bl.call("set_key_values", values=values)
+
+    def project_face(self, outdir=None, hair_cap=True, delight=0.3):
+        """Phase-3 texture: cleaned photo camera-projected onto the fitted mesh (per-vertex UV), body = skin colour."""
+        import cv2
+        from . import v3, texture
+        outdir = os.path.abspath(outdir or os.path.join(self.workdir, "textures_v3")); os.makedirs(outdir, exist_ok=True)
+        try: self.bl.call("add_eyes")
+        except Exception as e: pass
+        ref = cv2.imread(self.ref_image); labels = self.labels()
+        clean, filled = v3.clean_photo(ref, labels, os.path.join(outdir, "photo_clean.png"), delight=delight)
+        d = self.dump()
+        npz, info = v3.projection_npz(d, self.T_model_to_ref(), labels, filled, ref.shape, os.path.join(outdir, "proj.npz"), ref)
+        self.bl.call("setup_face_projection", npz_path=npz, photo_path=clean)
+        tpl = os.path.join(os.path.expanduser("~"), ".config/blender/4.2/extensions/.user/user_default/mpfb/data/eyes/materials/brown_eye.png")
+        if os.path.exists(tpl):
+            eye = texture.recolor_eye_texture(tpl, ref, labels, os.path.join(outdir, "eyes_iris_recolored.png"))
+            self.bl.call("apply_eye_texture", path=eye["path"])
+        if hair_cap: info["hair_cap"] = self.bl.call("make_hair_cap", npz_path=npz)
+        info["photo_clean"] = clean
+        return info
 
     def export_model(self, path, fmt=None):
         path = os.path.abspath(path); fmt = fmt or os.path.splitext(path)[1][1:]
