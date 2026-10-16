@@ -28,6 +28,13 @@ DEFAULT_FIT_PARAMS = [
     "cheek-volume-decr-incr", "cheek-bones-decr-incr", "cheek-inner-decr-incr", "forehead-scale-vert-decr-incr",
     "forehead-temple-decr-incr", "neck-scale-horiz-decr-incr",
 ]
+# depth sliders, only constrained when MediaPipe z (depth_weight > 0) is used
+DEPTH_FIT_PARAMS = [
+    "nose-trans-backward-forward", "nose-scale-depth-decr-incr", "nose-hump-decr-incr", "nose-greek-decr-incr",
+    "nose-curve-concave-convex", "chin-prominent-decr-incr", "chin-prognathism-decr-incr",
+    "mouth-trans-backward-forward", "mouth-scale-depth-decr-incr", "eyebrows-trans-backward-forward",
+    "forehead-trans-backward-forward", "eye-push1-in-out", "cheek-trans-down-up", "head-scale-depth-decr-incr",
+]
 
 
 def umeyama2d(src, dst, w=None):
@@ -82,6 +89,8 @@ class LinearFaceModel:
         self.D = np.stack(cols, -1) if cols else np.zeros(self.rest.shape + (0,))  # (N,3,K)
         self.P0 = project(self.rest)                         # (N,2)
         self.A = np.stack([self.D[:, 0, :], -self.D[:, 2, :]], 1)  # (N,2,K)
+        self.Z0 = -self.rest[:, 1]                           # depth toward camera (front = -Y)
+        self.Az = -self.D[:, 1, :]                           # (N,K)
 
     def w_from_values(self, values):
         w = np.zeros(len(self.cols_meta))
@@ -96,11 +105,31 @@ class LinearFaceModel:
             vals[n] += sgn * w[k]
         return {k: float(np.round(v, 4)) for k, v in vals.items()}
 
+    def depth(self, w):
+        return self.Z0 + self.Az @ w
+
     def points2d(self, w):
         return self.P0 + np.einsum("ndk,k->nd", self.A, w)
 
 
-def solve(model, ref2d, weights, w0=None, reg=0.02, iters=15, locked=None, max_abs=1.0):
+def depth_align(model_z, ref_z_toward, scale, weights):
+    """Map reference depth into model units: k*s*ref + tz. MediaPipe z has an unreliable global scale,
+    so k (depth/xy scale ratio) is fitted by weighted least squares and clamped to [0.3, 3]."""
+    w = np.asarray(weights, float); r = scale * np.asarray(ref_z_toward)
+    rm, mm = (w * r).sum() / w.sum(), (w * model_z).sum() / w.sum()
+    k = (w * (r - rm) * (model_z - mm)).sum() / max((w * (r - rm) ** 2).sum(), 1e-12)
+    k = float(np.clip(k, 0.3, 3.0))
+    return k * (r - rm) + mm
+
+
+def depth_error(model_z, ref_z_toward, scale, weights, iod_model):
+    t = depth_align(model_z, ref_z_toward, scale, weights)
+    return float(100 * np.sqrt(np.mean((model_z - t) ** 2)) / iod_model)
+
+
+def solve(model, ref2d, weights, w0=None, reg=0.02, iters=15, locked=None, max_abs=1.0,
+          ref_z=None, depth_weight=0.0, depth_mask=None):
+    """ref_z: MediaPipe z for the same points (pixels; smaller = closer). depth_weight scales depth residuals."""
     """Returns (values, history). ref2d in reference pixels; weights per point."""
     K = len(model.cols_meta)
     w = np.zeros(K) if w0 is None else np.asarray(w0, float).copy()
@@ -124,6 +153,13 @@ def solve(model, ref2d, weights, w0=None, reg=0.02, iters=15, locked=None, max_a
                 lb[k], ub[k] = val - 1e-9, val + 1e-9
         Areg = np.vstack([A, np.sqrt(reg) * np.eye(K)])
         breg = np.concatenate([b, np.zeros(K)])
+        if ref_z is not None and depth_weight > 0:
+            dm = np.ones(len(ref_z)) if depth_mask is None else np.asarray(depth_mask, float)
+            ztg = depth_align(model.depth(w), -np.asarray(ref_z), scale, weights * dm)
+            swz = np.sqrt(depth_weight * np.asarray(weights) * dm)
+            Az = model.Az * swz[:, None] / iod
+            bz = (ztg - model.Z0) * swz / iod
+            Areg = np.vstack([Areg, Az]); breg = np.concatenate([breg, bz])
         res = lsq_linear(Areg, breg, bounds=(lb, ub), method="bvls")
         w_new = res.x
         hist.append(float(np.sqrt(np.mean(((model.points2d(w_new) - tgt) ** 2).sum(1))) / iod))

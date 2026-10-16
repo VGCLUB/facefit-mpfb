@@ -21,7 +21,7 @@ git clone --depth 1 https://github.com/makehumancommunity/mpfb2
 blender -b --command extension install-file -r user_default -e mpfb.zip
 # 3. Python env for MCP server
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-curl -L -o testdata/face_landmarker.task https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
+scripts/download_models.sh   # MediaPipe landmarker, BiSeNet face-parsing ONNX, MakeHuman eyes (CC0) into MPFB user data
 ```
 Optional MPFB "system assets" pack (eyes/eyebrows/skins): <https://static.makehumancommunity.org/assets/assetpacks/makehuman_system_assets.html>. Fitting does not need it. On our test box the 280 MB download ran at about 12 KB/s, so we skipped it and render untextured clay.
 
@@ -29,6 +29,7 @@ Optional MPFB "system assets" pack (eyes/eyebrows/skins): <https://static.makehu
 ```bash
 BLENDER=/path/to/blender scripts/run_blender_headless.sh &      # headless bridge on 127.0.0.1:9876
 .venv/bin/python scripts/e2e_test.py testdata/your_face.png     # -> out/before.png after.png overlay.png report.json fitted.{glb,obj,stl}
+.venv/bin/python scripts/e2e_v2.py testdata/your_face.png       # phase 2: depth + texture -> out/v2_textured_front.png, v2_textured_34.png, out/textures/*
 .venv/bin/python scripts/mcp_smoke_test.py                      # drives the MCP server over stdio
 ```
 GUI alternative: install `blender_addon/facefit_bridge` as an add-on/extension, then open the N-panel ▸ FaceFit ▸ Start server.
@@ -44,7 +45,7 @@ env = { FACEFIT_PORT = "9876", FACEFIT_OUT = "/path/to/facefit/out" }
 (Equivalent: `codex mcp add facefit -- /path/to/facefit/.venv/bin/python -m facefit.mcp_server`, which must run with the repo as cwd.)
 
 ## MCP tools
-`load_reference_image`, `detect_landmarks`, `new_human`, `auto_fit(reg, params, style, locked)`, `list_parameters`, `get_parameters`, `set_parameters`, `render_view(overlay, markers)`, `get_landmark_error`, `undo`, `save_state`, `load_state`, `export_model(glb|obj|stl)`, `project_texture` (**stub, phase 2**).
+`load_reference_image`, `detect_landmarks`, `new_human`, `auto_fit(reg, params, style, locked)`, `list_parameters`, `get_parameters`, `set_parameters`, `render_view(overlay, markers)`, `get_landmark_error`, `undo`, `save_state`, `load_state`, `export_model(glb|obj|stl)`, `project_texture`, `render_textured(yaw_deg)`, `get_depth_error`.
 
 Stylisation: `auto_fit(style={"eye-scale-decr-incr": 0.2, "chin-triangle": 0.4})` adds offsets after the fit (bigger eyes, pointier chin).
 
@@ -54,9 +55,18 @@ Stylisation: `auto_fit(style={"eye-scale-decr-incr": 0.2, "chin-triangle": 0.4})
 | vertex-correspondence RMS (px / %IOD) | 8.85 / 5.49% | 4.95 / 3.07% |
 | independent check: MediaPipe re-run on render | 8.64 / 5.36% | 5.48 / 3.40% |
 
+## Phase 2 (v0.2)
+- **Texture projection** (`project_texture`): per-triangle affine warps take the photo into MPFB base-mesh UVs (4096²). A z-buffer handles occlusion, and each triangle is weighted by its normal. BiSeNet face parsing (ONNX, CPU) keeps hair and background out of the projection and writes UV-space masks and RGBA layers for skin, brows, lips, eyes and mouth (`out/textures/`). Unseen texels get a skin colour matched to the projection border, with a feathered seam and Telea inpainting. The eyes are MakeHuman high-poly eyes (CC0). Their iris is recoloured from the parsed reference iris, because the photo's iris is too small to project.
+- **Depth constraint** (`auto_fit(depth_weight=0.3)`): MediaPipe z is used for the brows, nose and mouth points. The depth scale and offset are free, and the jaw silhouette and eyelid points are excluded. This adds 14 depth sliders (nose projection and hump, chin prognathism, mouth and brow depth, and others).
+
+| metric | default head | 2D fit | 2D + depth fit |
+|---|---|---|---|
+| 2D RMS %IOD | 5.49 | 3.07 | 3.05 |
+| depth RMS %IOD (vs MediaPipe z) | 16.0 | 15.5 | 14.4 |
+
 ## Limitations / TODO
-- 2D frontal only. Depth sliders (nose projection, chin prominence) are not constrained. Next step: add a profile view or MediaPipe z.
+- Depth only comes from MediaPipe's monocular z, which is weak on stylised CG faces, so the gain is small (16.0→14.4 %IOD). A profile reference or a 3D face prior would do better.
 - Correspondences come from MediaPipe run on a clay render of the default MPFB head (about 4 px reprojection error at 1024 px). Jaw-contour points are silhouette-dependent and only approximate.
 - MPFB slider ranges cannot reach extreme anime proportions (very large eyes). The residual error is mostly from the eyes and jaw.
-- Texture projection, hair, eyes, eyebrow assets: phase 2.
+- The texture carries the photo's baked lighting. The forehead and temples under the hair are filled with a flat colour, and faint hair/earring streaks can remain near the jaw. In MPFB's base UV the face covers only about 25% of the texture width. Not done yet: hair, eyebrow geometry, delighting, normal maps.
 - Licenses: code GPL-3.0-or-later (it drives MPFB, which is GPL). MPFB assets are CC0. The MediaPipe model is Apache-2.0.

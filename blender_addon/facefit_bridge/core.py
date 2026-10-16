@@ -328,3 +328,141 @@ def export_model(path, fmt):
     else:
         raise ValueError("fmt must be glb/obj/stl")
     return path
+
+
+# ================================================================ phase 2: eyes, UV projection data, textured renders
+def _eyes_objects(h):
+    return [o for o in bpy.data.objects if o.get("facefit_eyes")]
+
+
+def add_eyes(mhclo=None):
+    """(Re)fit MPFB/MakeHuman high-poly eyes to the current head shape. Needs eyes/high-poly in an MPFB asset root."""
+    M = mpfb(); h = get_human()
+    for o in _eyes_objects(h):
+        bpy.data.objects.remove(o)
+    if mhclo is None:
+        LS = M["LocationService"]
+        cands = [os.path.join(LS.get_user_data("eyes"), "high-poly", "high-poly.mhclo"),
+                 os.path.join(LS.get_mpfb_data("eyes"), "high-poly", "high-poly.mhclo")]
+        mhclo = next((c for c in cands if os.path.exists(c)), None)
+        if mhclo is None:
+            raise FileNotFoundError("eyes/high-poly/high-poly.mhclo not found in MPFB user data")
+    o = M["HumanService"].add_mhclo_asset(mhclo, h, asset_type="Eyes", subdiv_levels=0, material_type="MAKESKIN",
+                                          set_up_rigging=False)
+    o["facefit_eyes"] = True
+    return o.name
+
+
+def _tri_data(obj, coords):
+    me = obj.data
+    me.calc_loop_triangles()
+    nt = len(me.loop_triangles)
+    tv = np.empty(nt * 3, np.int64); me.loop_triangles.foreach_get("vertices", tv); tv = tv.reshape(-1, 3)
+    tl = np.empty(nt * 3, np.int64); me.loop_triangles.foreach_get("loops", tl); tl = tl.reshape(-1, 3)
+    uvl = me.uv_layers.active
+    uv = np.empty(len(me.loops) * 2, np.float32); uvl.data.foreach_get("uv", uv); uv = uv.reshape(-1, 2)
+    # vertex normals from the (shape-keyed) coordinates
+    a, b, c = coords[tv[:, 0]], coords[tv[:, 1]], coords[tv[:, 2]]
+    fn = np.cross(b - a, c - a)
+    vn = np.zeros_like(coords)
+    for k in range(3): np.add.at(vn, tv[:, k], fn)
+    vn /= np.linalg.norm(vn, axis=1, keepdims=True) + 1e-12
+    return tv, uv[tl], vn
+
+
+def uv_projection_data(path, head_only=True):
+    """Dump per-triangle UVs, vertex render-pixel coords, depth and normals for the human (and eyes) to an .npz."""
+    from bpy_extras.object_utils import world_to_camera_view
+    h = get_human(); sc = bpy.context.scene
+    cam = setup_camera(h, res=sc.render.resolution_x)
+    W = sc.render.resolution_x
+    s, cx, cz = cam.data.ortho_scale, cam.location.x, cam.location.z
+    out = {}
+    objs = [("human", h)] + [("eyes", o) for o in _eyes_objects(h)]
+    for tag, o in objs:
+        if tag == "human":
+            co = evaluated_coords(h)
+        else:
+            dg = bpy.context.evaluated_depsgraph_get(); oe = o.evaluated_get(dg)
+            co = np.array([oe.matrix_world @ v.co for v in oe.data.vertices])
+            if len(co) != len(o.data.vertices):
+                raise RuntimeError("eyes evaluated topology differs")
+        tv, tuv, vn = _tri_data(o if tag != "eyes" else o, co)
+        px = np.stack([(co[:, 0] - cx) / s * W + W / 2, (cz - co[:, 2]) / s * W + W / 2], 1)
+        keep = np.ones(len(tv), bool)
+        if tag == "human":
+            g = h.vertex_groups.get("HelperGeometry")
+            if g:
+                hm = np.zeros(len(co), bool)
+                for v in h.data.vertices:
+                    if any(e.group == g.index for e in v.groups): hm[v.index] = True
+                keep &= ~hm[tv].any(1)
+            if head_only:
+                keep &= (co[tv][:, :, 2].min(1) > h["facefit_top"] - 0.42)
+        out[f"{tag}_tv"] = tv[keep]; out[f"{tag}_uv"] = tuv[keep]
+        out[f"{tag}_px"] = px; out[f"{tag}_depth"] = -co[:, 1]; out[f"{tag}_cos"] = -vn[:, 1]
+    np.savez_compressed(path, res=W, **out)
+    return path
+
+
+def apply_textures(albedo, eyes_albedo=None):
+    """Assign a Principled material using the projected albedo (MPFB UV) to the human and eyes."""
+    h = get_human()
+    def mat(name, img_path, rough=0.5, spec=0.3):
+        m = bpy.data.materials.get(name) or bpy.data.materials.new(name)
+        m.use_nodes = True; nt = m.node_tree
+        for n in list(nt.nodes): nt.nodes.remove(n)
+        outn = nt.nodes.new("ShaderNodeOutputMaterial"); bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
+        tex = nt.nodes.new("ShaderNodeTexImage")
+        img = bpy.data.images.load(img_path, check_existing=False); tex.image = img
+        nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+        nt.links.new(bsdf.outputs["BSDF"], outn.inputs["Surface"])
+        bsdf.inputs["Roughness"].default_value = rough
+        if name.endswith("eyes"):
+            nt.links.new(tex.outputs["Alpha"], bsdf.inputs["Alpha"])
+            if hasattr(m, "surface_render_method"): m.surface_render_method = "BLENDED"
+        if "Subsurface Weight" in bsdf.inputs and name.endswith("skin"):
+            bsdf.inputs["Subsurface Weight"].default_value = 0.15
+            bsdf.inputs["Subsurface Radius"].default_value = (0.01, 0.004, 0.002)
+            bsdf.inputs["Subsurface Scale"].default_value = 0.02
+        return m
+    m = mat("facefit_skin", albedo)
+    h.data.materials.clear(); h.data.materials.append(m)
+    for p in h.data.polygons: p.material_index = 0
+    for o in _eyes_objects(h):
+        if eyes_albedo:
+            o.data.uv_layers.active_index = 0
+            me = mat("facefit_eyes", eyes_albedo, rough=0.15)
+            o.data.materials.clear(); o.data.materials.append(me)
+    return True
+
+
+def render_textured(path, res=768, yaw_deg=0.0, samples=48, engine="CYCLES"):
+    """Cycles CPU render with simple 3-point lighting; yaw rotates the camera around the head (35 = 3/4 view)."""
+    h = get_human(); sc = bpy.context.scene
+    cam = setup_camera(h, res=res)
+    top = h["facefit_top"]; c = np.array([h.matrix_world.translation.x, -0.02, top - 0.13])
+    a = math.radians(yaw_deg); r = 3.0
+    cam.location = (c[0] - r * math.sin(a), c[1] - r * math.cos(a), c[2])
+    cam.rotation_euler = (math.pi / 2, 0, -a)
+    # lights
+    for nm, loc, en, size in (("ff_key", (-0.8, -1.2, top + 0.4), 22, 1.5), ("ff_fill", (0.9, -1.0, top), 10, 2.0),
+                              ("ff_rim", (0.3, 1.0, top + 0.3), 15, 0.8)):
+        L = bpy.data.objects.get(nm)
+        if L is None:
+            L = bpy.data.objects.new(nm, bpy.data.lights.new(nm, "AREA")); sc.collection.objects.link(L)
+        L.location = loc; L.data.energy = en; L.data.size = size
+        d = np.array(c) - np.array(loc); L.rotation_euler = (np.array([0, 0, 0]))
+        L.rotation_euler = __import__("mathutils").Vector(d).to_track_quat("-Z", "Y").to_euler()
+    if sc.world is None: sc.world = bpy.data.worlds.new("ff_world")
+    sc.world.use_nodes = True
+    sc.world.node_tree.nodes["Background"].inputs["Color"].default_value = (0.05, 0.05, 0.06, 1)
+    sc.world.node_tree.nodes["Background"].inputs["Strength"].default_value = 0.6
+    sc.render.engine = engine
+    if engine == "CYCLES":
+        sc.cycles.device = "CPU"; sc.cycles.samples = samples; sc.cycles.use_denoising = True
+    sc.view_settings.view_transform = "Standard"  # keep projected albedo colours faithful
+    sc.render.filepath = path; sc.render.image_settings.file_format = "PNG"
+    bpy.ops.render.render(write_still=True)
+    setup_camera(h, res=res)  # restore front camera for projections
+    return path

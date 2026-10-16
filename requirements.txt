@@ -4,3 +4,4 @@ numpy
 scipy
 pillow
 opencv-python-headless
+onnxruntime

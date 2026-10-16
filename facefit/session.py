@@ -91,23 +91,42 @@ class FaceFitSession:
         e = F.landmark_error(self.model2d(), self.ref2d(), self.weights, self.ref_iod())
         e.pop("per_point_px"); return e
 
-    def auto_fit(self, params=None, reg=0.005, style=None, locked=None, iters=15):
+    def ref_z(self):
+        return np.array(self.ref["landmarks_px"])[self.mp_ids, 2]
+
+    def depth_mask(self):
+        # jaw = silhouette (MediaPipe z unreliable); eyelid vertices sit on the eye-hole rim (depth noisy)
+        from .landmark_sets import JAW, EYES
+        return np.array([0.0 if (i in JAW or i in EYES) else 1.0 for i in self.mp_ids])
+
+    def get_depth_error(self):
+        """RMS depth error (% model IOD) of mapped vertices vs MediaPipe z (scale from 2D alignment, free offset)."""
+        if self.ref is None: self.detect_landmarks()
+        m2 = self.model2d(); V = np.array(self.bl.call("vertex_coords", vertex_ids=self.vids))
+        P = F.project(V)
+        T = F.umeyama2d(self.ref2d(), P, self.weights); s = np.sqrt(abs(np.linalg.det(T[:, :2])))
+        iod = np.linalg.norm(P[self.mp_ids.index(F.L_EYE_OUT)] - P[self.mp_ids.index(F.R_EYE_OUT)])
+        dm = self.depth_mask()
+        return F.depth_error(-V[:, 1], -self.ref_z(), s, self.weights * dm, iod) if dm.any() else None
+
+    def auto_fit(self, params=None, reg=0.005, style=None, locked=None, iters=15, depth_weight=0.0):
         """Fit sliders to the reference. style: offsets added after fitting (e.g. {'eye-scale-decr-incr': 0.2})."""
-        params = params or F.DEFAULT_FIT_PARAMS
+        params = params or (F.DEFAULT_FIT_PARAMS + (F.DEPTH_FIT_PARAMS if depth_weight > 0 else []))
         avail = {p["name"] for p in self.list_parameters()}
         params = [p for p in params if p in avail]
         self.push_undo()
-        before = self.get_landmark_error()
+        before = self.get_landmark_error(); before["depth_rms_iod_pct"] = self.get_depth_error()
         lm = self.bl.call("linear_model", vertex_ids=self.vids, param_names=params)
         model = F.LinearFaceModel(lm)
         cur = self.bl.call("get_parameters", names=params)
         t = time.time()
         vals, hist = F.solve(model, self.ref2d(), self.weights, w0=model.w_from_values(cur), reg=reg,
-                             iters=iters, locked=locked)
+                             iters=iters, locked=locked, ref_z=self.ref_z(), depth_weight=depth_weight,
+                             depth_mask=self.depth_mask())
         for k, dv in (style or {}).items():
             vals[k] = float(np.clip(vals.get(k, 0.0) + dv, -1, 1))
         self.bl.call("set_parameters", values=vals)
-        after = self.get_landmark_error()
+        after = self.get_landmark_error(); after["depth_rms_iod_pct"] = self.get_depth_error()
         return dict(error_before=before, error_after=after, solve_seconds=round(time.time() - t, 2),
                     iterations=len(hist), objective_history=hist,
                     parameters={k: v for k, v in vals.items() if abs(v) > 1e-3})
@@ -142,6 +161,39 @@ class FaceFitSession:
         p = np.array(r["landmarks_px"])[self.mp_ids, :2]
         e = F.landmark_error(p, self.ref2d(), self.weights, self.ref_iod()); e.pop("per_point_px"); e.pop("T_model_to_ref")
         return e
+
+    def project_texture(self, outdir=None, res=768, add_eyes=True):
+        """Project the reference onto MPFB UVs; writes albedo + region masks; applies material in Blender."""
+        import cv2
+        from . import texture, parsing
+        if self.ref is None: self.detect_landmarks()
+        outdir = os.path.abspath(outdir or os.path.join(self.workdir, "textures"))
+        os.makedirs(outdir, exist_ok=True)
+        eyes = None
+        if add_eyes:
+            try: eyes = self.bl.call("add_eyes")
+            except Exception as e: eyes = f"failed: {str(e).splitlines()[0]}"
+        npz = os.path.join(outdir, "uvproj.npz")
+        self.bl.call("uv_projection_data", path=npz, res=res)
+        m2d = np.array(self.bl.call("project_vertices", vertex_ids=self.vids, res=res))
+        T = F.umeyama2d(m2d, self.ref2d(), self.weights)
+        ref = cv2.imread(self.ref_image)
+        labels = parsing.parse(ref, self.ref["landmarks_px"])
+        cv2.imwrite(os.path.join(outdir, "ref_parsing.png"), cv2.addWeighted(ref, 0.4, parsing.colorize(labels), 0.6, 0))
+        res_files = texture.project(npz, ref, T, labels, outdir)
+        # eyes: the photo's iris covers too few pixels for direct projection -> recolour the MakeHuman eye texture
+        tpl = os.path.join(os.path.expanduser("~"), ".config/blender/4.2/extensions/.user/user_default/mpfb/data/eyes/materials/brown_eye.png")
+        tpl = os.environ.get("FACEFIT_EYE_TEMPLATE", tpl)
+        eye_tex = None
+        if os.path.exists(tpl):
+            eye = texture.recolor_eye_texture(tpl, ref, labels, os.path.join(outdir, "eyes_iris_recolored.png"))
+            res_files["eyes_recolored"] = eye; eye_tex = eye["path"]
+        self.bl.call("apply_textures", albedo=res_files["human"]["albedo"],
+                     eyes_albedo=eye_tex or res_files.get("eyes", {}).get("albedo"))
+        return dict(eyes=eyes, files=res_files)
+
+    def render_textured(self, path, yaw_deg=0.0, res=768, samples=48):
+        return dict(path=self.bl.call("render_textured", path=os.path.abspath(path), res=res, yaw_deg=yaw_deg, samples=samples))
 
     def export_model(self, path, fmt=None):
         path = os.path.abspath(path); fmt = fmt or os.path.splitext(path)[1][1:]

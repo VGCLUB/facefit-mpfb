@@ -21,6 +21,11 @@ COMMANDS = {
     "project_vertices": lambda vertex_ids, res=768: (core.setup_camera(res=res), core.project_vertices(vertex_ids))[1],
     "raycast_pixels": lambda pixels, res=768: core.raycast_pixels(pixels, res),
     "save_blend": lambda path: core.save_blend(path),
+    "vertex_coords": lambda vertex_ids: core.evaluated_coords(vertex_ids=vertex_ids).tolist(),
+    "add_eyes": lambda mhclo=None: core.add_eyes(mhclo),
+    "uv_projection_data": lambda path, res=768: (core.setup_camera(res=res), core.uv_projection_data(path))[1],
+    "apply_textures": lambda albedo, eyes_albedo=None: core.apply_textures(albedo, eyes_albedo),
+    "render_textured": lambda path, res=768, yaw_deg=0.0, samples=48: core.render_textured(path, res, yaw_deg, samples),
     "export_model": lambda path, fmt="glb": core.export_model(path, fmt),
 }
 

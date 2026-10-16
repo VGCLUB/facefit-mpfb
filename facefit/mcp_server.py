@@ -42,12 +42,13 @@ def new_human(gender: float = 0.5, age: float = 0.5, asian: float | None = None)
 
 @mcp.tool()
 def auto_fit(reg: float = 0.005, params: list[str] | None = None, style: dict[str, float] | None = None,
-             locked: dict[str, float] | None = None) -> dict:
+             locked: dict[str, float] | None = None, depth_weight: float = 0.3) -> dict:
     """Solve MPFB face sliders (bounded least squares) to match reference landmarks.
     reg: ridge strength (higher = closer to default face). params: subset of slider names (default: ~48 frontal face sliders).
     style: offsets applied after fitting, e.g. {"eye-scale-decr-incr": 0.2, "chin-triangle": 0.4} for a more stylised look.
-    locked: sliders held fixed at given values during the solve."""
-    return S().auto_fit(params=params, reg=reg, style=style, locked=locked)
+    locked: sliders held fixed at given values during the solve.
+    depth_weight: weight of MediaPipe z depth residuals (0 = 2D only); enables nose/chin/mouth depth sliders."""
+    return S().auto_fit(params=params, reg=reg, style=style, locked=locked, depth_weight=depth_weight)
 
 
 @mcp.tool()
@@ -107,9 +108,23 @@ def export_model(path: str, fmt: str | None = None) -> dict:
 
 
 @mcp.tool()
-def project_texture(path: str | None = None) -> dict:
-    """TODO (phase 2): project the reference photo onto the face UVs. Not implemented yet."""
-    return {"implemented": False, "note": "Texture projection is planned for phase 2 (see README)."}
+def project_texture(outdir: str | None = None, add_eyes: bool = True) -> dict:
+    """Project the reference photo onto the fitted head's MPFB UVs. Face parsing (BiSeNet, CPU) splits skin/brows/lips/eyes
+    masks; hair/background are never projected; unseen texels are filled with a border-matched skin colour.
+    Also (re)fits MakeHuman eyes and recolours the iris to the reference. Applies the material in Blender. Run after auto_fit."""
+    return S().project_texture(outdir=outdir, add_eyes=add_eyes)
+
+
+@mcp.tool()
+def render_textured(path: str, yaw_deg: float = 0.0, res: int = 768, samples: int = 48) -> dict:
+    """Cycles CPU render of the textured head. yaw_deg=35 gives a 3/4 view."""
+    return S().render_textured(path, yaw_deg=yaw_deg, res=res, samples=samples)
+
+
+@mcp.tool()
+def get_depth_error() -> dict:
+    """RMS depth error (% IOD) of mapped vertices vs MediaPipe z (free depth scale/offset; jaw+eyelids excluded)."""
+    return {"depth_rms_iod_pct": S().get_depth_error()}
 
 
 def main():
