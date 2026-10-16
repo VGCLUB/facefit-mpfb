@@ -1,0 +1,233 @@
+{
+ "source": "auto-calibrated on default MPFB2 human render (MediaPipe + raycast)",
+ "pairs": [
+  {
+   "mp": 132,
+   "vertex": 869
+  },
+  {
+   "mp": 172,
+   "vertex": 5240
+  },
+  {
+   "mp": 136,
+   "vertex": 737
+  },
+  {
+   "mp": 150,
+   "vertex": 3698
+  },
+  {
+   "mp": 149,
+   "vertex": 917
+  },
+  {
+   "mp": 176,
+   "vertex": 914
+  },
+  {
+   "mp": 148,
+   "vertex": 918
+  },
+  {
+   "mp": 152,
+   "vertex": 5296
+  },
+  {
+   "mp": 377,
+   "vertex": 11897
+  },
+  {
+   "mp": 400,
+   "vertex": 11832
+  },
+  {
+   "mp": 378,
+   "vertex": 11833
+  },
+  {
+   "mp": 379,
+   "vertex": 11834
+  },
+  {
+   "mp": 365,
+   "vertex": 11836
+  },
+  {
+   "mp": 397,
+   "vertex": 11904
+  },
+  {
+   "mp": 288,
+   "vertex": 11819
+  },
+  {
+   "mp": 361,
+   "vertex": 11768
+  },
+  {
+   "mp": 70,
+   "vertex": 211
+  },
+  {
+   "mp": 63,
+   "vertex": 207
+  },
+  {
+   "mp": 105,
+   "vertex": 206
+  },
+  {
+   "mp": 66,
+   "vertex": 177
+  },
+  {
+   "mp": 107,
+   "vertex": 208
+  },
+  {
+   "mp": 300,
+   "vertex": 6987
+  },
+  {
+   "mp": 293,
+   "vertex": 6982
+  },
+  {
+   "mp": 334,
+   "vertex": 6981
+  },
+  {
+   "mp": 296,
+   "vertex": 6953
+  },
+  {
+   "mp": 336,
+   "vertex": 6983
+  },
+  {
+   "mp": 33,
+   "vertex": 4855
+  },
+  {
+   "mp": 160,
+   "vertex": 1353
+  },
+  {
+   "mp": 158,
+   "vertex": 5316
+  },
+  {
+   "mp": 133,
+   "vertex": 4870
+  },
+  {
+   "mp": 153,
+   "vertex": 1332
+  },
+  {
+   "mp": 144,
+   "vertex": 1350
+  },
+  {
+   "mp": 263,
+   "vertex": 7995
+  },
+  {
+   "mp": 387,
+   "vertex": 11916
+  },
+  {
+   "mp": 385,
+   "vertex": 6838
+  },
+  {
+   "mp": 362,
+   "vertex": 6857
+  },
+  {
+   "mp": 380,
+   "vertex": 13367
+  },
+  {
+   "mp": 373,
+   "vertex": 8007
+  },
+  {
+   "mp": 168,
+   "vertex": 133
+  },
+  {
+   "mp": 6,
+   "vertex": 135
+  },
+  {
+   "mp": 4,
+   "vertex": 5054
+  },
+  {
+   "mp": 1,
+   "vertex": 302
+  },
+  {
+   "mp": 2,
+   "vertex": 317
+  },
+  {
+   "mp": 98,
+   "vertex": 286
+  },
+  {
+   "mp": 327,
+   "vertex": 7119
+  },
+  {
+   "mp": 64,
+   "vertex": 337
+  },
+  {
+   "mp": 294,
+   "vertex": 7099
+  },
+  {
+   "mp": 61,
+   "vertex": 3737
+  },
+  {
+   "mp": 291,
+   "vertex": 10401
+  },
+  {
+   "mp": 0,
+   "vertex": 466
+  },
+  {
+   "mp": 17,
+   "vertex": 492
+  },
+  {
+   "mp": 13,
+   "vertex": 474
+  },
+  {
+   "mp": 14,
+   "vertex": 493
+  },
+  {
+   "mp": 37,
+   "vertex": 457
+  },
+  {
+   "mp": 267,
+   "vertex": 7219
+  },
+  {
+   "mp": 84,
+   "vertex": 486
+  },
+  {
+   "mp": 314,
+   "vertex": 7241
+  }
+ ]
+}

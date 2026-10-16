@@ -1,0 +1,19 @@
+# env / caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# blender binaries / downloads
+blender-*/
+*.tar.xz
+*.zip
+*.blend
+*.blend1
+# models / third-party assets (downloaded at install time)
+*.task
+models/
+assets/
+# test data (user-provided, possibly copyrighted) and all outputs
+testdata/*
+!testdata/README.md
+out/

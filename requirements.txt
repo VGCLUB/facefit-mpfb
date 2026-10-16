@@ -1,0 +1,6 @@
+mcp>=1.2
+mediapipe>=0.10.14
+numpy
+scipy
+pillow
+opencv-python-headless

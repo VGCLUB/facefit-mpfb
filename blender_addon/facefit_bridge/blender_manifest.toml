@@ -1,0 +1,12 @@
+schema_version = "1.0.0"
+id = "facefit_bridge"
+version = "0.1.0"
+name = "FaceFit Bridge"
+tagline = "Fit MPFB2 heads to reference photos via MCP"
+maintainer = "FaceFit contributors"
+type = "add-on"
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+[permissions]
+network = "Local socket server for the FaceFit MCP server"
+files = "Write renders and exports"
