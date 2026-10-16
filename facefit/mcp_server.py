@@ -134,13 +134,6 @@ def project_face_photo(hair_cap: bool = True, delight: float = 0.3) -> dict:
     return S().project_face(hair_cap=hair_cap, delight=delight)
 
 
-def _unused_project_face_photo(hair_cap: bool = True, delight: float = 0.3) -> dict:
-    """Phase-3 likeness texture: cleaned frontal photo (hair strands/earrings inpainted, mild de-lighting) camera-projected
-    onto the fitted mesh with a dedicated per-vertex UV (native photo resolution), feathered into body skin colour.
-    Adds MakeHuman eyes (iris recoloured) and a simple hair cap with long side curtains. Run after auto_fit(vertex_refine=True)."""
-    return S().project_face(hair_cap=hair_cap, delight=delight)
-
-
 @mcp.tool()
 def calibrate_eyes(rounds: int = 2) -> dict:
     """Scale/move the eyeballs so iris size and centre in a render match the photo (MediaPipe iris landmarks)."""
