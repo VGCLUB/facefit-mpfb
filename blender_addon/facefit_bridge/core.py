@@ -350,6 +350,11 @@ def add_eyes(mhclo=None):
     o = M["HumanService"].add_mhclo_asset(mhclo, h, asset_type="Eyes", subdiv_levels=0, material_type="MAKESKIN",
                                           set_up_rigging=False)
     o["facefit_eyes"] = True
+    # drop the cornea shells (UV island in the texture corner): they only render correctly with refraction/alpha
+    import bmesh
+    bm = bmesh.new(); bm.from_mesh(o.data); uv = bm.loops.layers.uv.active
+    dead = [f for f in bm.faces if all(l[uv].uv.x > 0.85 and l[uv].uv.y < 0.15 for l in f.loops)]
+    bmesh.ops.delete(bm, geom=dead, context="FACES"); bm.to_mesh(o.data); bm.free(); o.data.update()
     return o.name
 
 
@@ -437,7 +442,7 @@ def apply_textures(albedo, eyes_albedo=None):
     return True
 
 
-def render_textured(path, res=768, yaw_deg=0.0, samples=48, engine="CYCLES"):
+def render_textured(path, res=768, yaw_deg=0.0, samples=48, engine="CYCLES", light="soft", bg=(0.29, 0.29, 0.30)):
     """Cycles CPU render with simple 3-point lighting; yaw rotates the camera around the head (35 = 3/4 view)."""
     h = get_human(); sc = bpy.context.scene
     cam = setup_camera(h, res=res)
@@ -446,8 +451,11 @@ def render_textured(path, res=768, yaw_deg=0.0, samples=48, engine="CYCLES"):
     cam.location = (c[0] - r * math.sin(a), c[1] - r * math.cos(a), c[2])
     cam.rotation_euler = (math.pi / 2, 0, -a)
     # lights
-    for nm, loc, en, size in (("ff_key", (-0.8, -1.2, top + 0.4), 22, 1.5), ("ff_fill", (0.9, -1.0, top), 10, 2.0),
-                              ("ff_rim", (0.3, 1.0, top + 0.3), 15, 0.8)):
+    rig = ((("ff_key", (-0.8, -1.2, top + 0.4), 22, 1.5), ("ff_fill", (0.9, -1.0, top), 10, 2.0),
+            ("ff_rim", (0.3, 1.0, top + 0.3), 15, 0.8)) if light == "studio" else
+           (("ff_key", (0.0, -1.6, top + 0.35), 55, 2.5), ("ff_fill", (0.0, -1.4, top - 0.45), 12, 2.5),
+            ("ff_rim", (0.0, 1.2, top + 0.4), 6, 2.0)))
+    for nm, loc, en, size in rig:
         L = bpy.data.objects.get(nm)
         if L is None:
             L = bpy.data.objects.new(nm, bpy.data.lights.new(nm, "AREA")); sc.collection.objects.link(L)
@@ -456,8 +464,8 @@ def render_textured(path, res=768, yaw_deg=0.0, samples=48, engine="CYCLES"):
         L.rotation_euler = __import__("mathutils").Vector(d).to_track_quat("-Z", "Y").to_euler()
     if sc.world is None: sc.world = bpy.data.worlds.new("ff_world")
     sc.world.use_nodes = True
-    sc.world.node_tree.nodes["Background"].inputs["Color"].default_value = (0.05, 0.05, 0.06, 1)
-    sc.world.node_tree.nodes["Background"].inputs["Strength"].default_value = 0.6
+    sc.world.node_tree.nodes["Background"].inputs["Color"].default_value = (*bg, 1) if light == "soft" else (0.05, 0.05, 0.06, 1)
+    sc.world.node_tree.nodes["Background"].inputs["Strength"].default_value = 1.0 if light == "soft" else 0.6
     sc.render.engine = engine
     if engine == "CYCLES":
         sc.cycles.device = "CPU"; sc.cycles.samples = samples; sc.cycles.use_denoising = True
@@ -499,6 +507,12 @@ def mesh_dump(path):
     np.savez_compressed(path, co=co, normals=vn, helper=helper, tris=tv, basis=basis.reshape(-1, 3),
                         top=float(h["facefit_top"]) if "facefit_top" in h else float(co[:, 2].max()))
     return path
+
+
+def reframe():
+    h = get_human()
+    if "facefit_top" in h: del h["facefit_top"]
+    setup_camera(h); return h["facefit_top"]
 
 
 def set_delta_key(name, npy_path, value=1.0):
@@ -570,7 +584,8 @@ def setup_face_projection(npz_path, photo_path, body_albedo=None):
     else:
         L(mix.outputs[2], bsdf.inputs["Base Color"])
     L(bsdf.outputs["BSDF"], out.inputs["Surface"])
-    bsdf.inputs["Roughness"].default_value = 0.45
+    bsdf.inputs["Roughness"].default_value = 0.5
+    if "Specular IOR Level" in bsdf.inputs: bsdf.inputs["Specular IOR Level"].default_value = 0.3
     if "Subsurface Weight" in bsdf.inputs:
         bsdf.inputs["Subsurface Weight"].default_value = 0.2
         bsdf.inputs["Subsurface Radius"].default_value = (0.01, 0.004, 0.002); bsdf.inputs["Subsurface Scale"].default_value = 0.01
@@ -630,4 +645,68 @@ def apply_eye_texture(path):
         nt.links.new(t.outputs["Color"], b.inputs["Base Color"]); nt.links.new(t.outputs["Alpha"], b.inputs["Alpha"])
         nt.links.new(b.outputs["BSDF"], out.inputs["Surface"]); b.inputs["Roughness"].default_value = 0.15
         o.data.materials.clear(); o.data.materials.append(m)
+    return True
+
+
+# ================================================================ phase 4: eyes calibration / photo eyes material / soft light
+def adjust_eyes(scales, offsets, centers_px, res):
+    """Absolute per-eye scale + model-plane offset (dx, d(-z)) applied to the fitted eyeball mesh (from original coords)."""
+    h = get_human()
+    for o in _eyes_objects(h):
+        me = o.data; n = len(me.vertices)
+        if "ff_orig" not in me.attributes:
+            a = me.attributes.new("ff_orig", "FLOAT_VECTOR", "POINT")
+            co = np.empty(n * 3, np.float32); me.vertices.foreach_get("co", co); a.data.foreach_set("vector", co)
+        orig = np.empty(n * 3, np.float32); me.attributes["ff_orig"].data.foreach_get("vector", orig); orig = orig.reshape(-1, 3)
+        mw = np.array(o.matrix_world); wco = orig @ mw[:3, :3].T + mw[:3, 3]
+        new = wco.copy()
+        for k in range(2):
+            side = 1 if centers_px[k][0] > res / 2 else -1
+            sel = (wco[:, 0] - h.matrix_world.translation.x) * side > 0
+            c = wco[sel].mean(0)
+            new[sel] = c + (wco[sel] - c) * float(scales[k])
+            new[sel, 0] += offsets[k][0]; new[sel, 2] -= offsets[k][1]
+        inv = np.linalg.inv(mw); loc = new @ inv[:3, :3].T + inv[:3, 3]
+        me.vertices.foreach_set("co", loc.astype(np.float32).ravel()); me.update()
+    return True
+
+
+def setup_eye_material(iris_tex, photo, lash_mask, T, W, H, lash=True, coat=0.0):
+    """Eyeball material = iris/sclera texture (MPFB UV) with photo eyelashes composited via camera-projection UV."""
+    h = get_human(); T = np.asarray(T)
+    for o in _eyes_objects(h):
+        me = o.data
+        dg = bpy.context.evaluated_depsgraph_get(); oe = o.evaluated_get(dg)
+        mw = np.array(o.matrix_world)
+        co = np.empty(len(me.vertices) * 3, np.float32); me.vertices.foreach_get("co", co); co = co.reshape(-1, 3) @ mw[:3, :3].T + mw[:3, 3]
+        P = np.stack([co[:, 0], -co[:, 2]], 1); q = P @ T[:, :2].T + T[:, 2]
+        uvp = np.stack([q[:, 0] / W, 1 - q[:, 1] / H], 1).astype(np.float32)
+        vidx = np.empty(len(me.loops), np.int64); me.loops.foreach_get("vertex_index", vidx)
+        base_uv = me.uv_layers[0].name
+        l = me.uv_layers.get("facefit_proj") or me.uv_layers.new(name="facefit_proj")
+        l.data.foreach_set("uv", uvp[vidx].ravel())
+        m = bpy.data.materials.get("facefit_eyes") or bpy.data.materials.new("facefit_eyes")
+        m.use_nodes = True; nt = m.node_tree
+        for n in list(nt.nodes): nt.nodes.remove(n)
+        N = nt.nodes.new; L = nt.links.new
+        out = N("ShaderNodeOutputMaterial"); b = N("ShaderNodeBsdfPrincipled")
+        u0 = N("ShaderNodeUVMap"); u0.uv_map = base_uv
+        ti = N("ShaderNodeTexImage"); ti.image = bpy.data.images.load(iris_tex, check_existing=False); L(u0.outputs["UV"], ti.inputs["Vector"])
+        u1 = N("ShaderNodeUVMap"); u1.uv_map = "facefit_proj"
+        tp = N("ShaderNodeTexImage"); tp.image = bpy.data.images.load(photo, check_existing=False); tp.extension = "EXTEND"
+        tl = N("ShaderNodeTexImage"); tl.image = bpy.data.images.load(lash_mask, check_existing=False); tl.extension = "EXTEND"
+        tl.image.colorspace_settings.name = "Non-Color"
+        L(u1.outputs["UV"], tp.inputs["Vector"]); L(u1.outputs["UV"], tl.inputs["Vector"])
+        mix = N("ShaderNodeMix"); mix.data_type = "RGBA"
+        if lash: L(tl.outputs["Color"], mix.inputs["Factor"])
+        else: mix.inputs["Factor"].default_value = 0.0
+        L(ti.outputs["Color"], mix.inputs[6]); L(tp.outputs["Color"], mix.inputs[7])
+        L(mix.outputs[2], b.inputs["Base Color"])
+        # big soft frontal key -> a glossy eyeball reflects it everywhere and greys the iris; keep spec low
+        b.inputs["Roughness"].default_value = 0.35
+        if "Specular IOR Level" in b.inputs: b.inputs["Specular IOR Level"].default_value = 0.1
+        if "Coat Weight" in b.inputs:
+            b.inputs["Coat Weight"].default_value = coat; b.inputs["Coat Roughness"].default_value = 0.02
+        L(b.outputs["BSDF"], out.inputs["Surface"])
+        me.materials.clear(); me.materials.append(m)
     return True

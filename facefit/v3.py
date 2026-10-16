@@ -12,10 +12,10 @@ def srgb_to_linear(c):
     return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
 
 
-def clean_photo(ref, labels, out_path, delight=0.3, band=25):
+def clean_photo(ref, labels, out_path, delight=0.3, band=25, label_set=None):
     """Inpaint hair strands / earrings crossing the face, extend skin beyond the face edge, mild de-lighting."""
-    rows_filled = R.face_boundary(labels)
-    face = np.isin(labels, FACE_LABELS).astype(np.uint8)
+    rows_filled = R.face_boundary(labels, label_set)
+    face = np.isin(labels, label_set or FACE_LABELS).astype(np.uint8)
     filled = rows_filled[1] if rows_filled else face
     strands = ((filled > 0) & (face == 0)).astype(np.uint8)          # non-face pixels inside the face hull
     strands = cv2.dilate(strands, np.ones((5, 5), np.uint8))
@@ -48,7 +48,7 @@ def clean_photo(ref, labels, out_path, delight=0.3, band=25):
     return out_path, filled
 
 
-def projection_npz(dump, T_model_to_ref, labels, filled, ref_shape, out_path, ref_bgr):
+def projection_npz(dump, T_model_to_ref, labels, filled, ref_shape, out_path, ref_bgr, with_hair=True):
     co, nrm, top = dump["co"], dump["normals"], float(dump["top"])
     H, W = ref_shape[:2]
     P = F.project(co); Tm = np.asarray(T_model_to_ref)
@@ -60,7 +60,7 @@ def projection_npz(dump, T_model_to_ref, labels, filled, ref_shape, out_path, re
     qi = np.clip(np.round(q).astype(int), 0, [W - 1, H - 1])
     m_img = fm[qi[:, 1], qi[:, 0]]
     cosv = -nrm[:, 1]
-    m = m_img * np.clip((cosv - 0.15) / 0.35, 0, 1) * (co[:, 2] > top - 0.40) * ~dump["helper"]
+    m = m_img * np.clip((cosv - 0.05) / 0.30, 0, 1) * (co[:, 2] > top - 0.40) * ~dump["helper"]
     skin = ref_bgr[labels == 1]
     skin_rgb = srgb_to_linear(np.median(skin, 0)[::-1]) if len(skin) else np.array([0.6, 0.45, 0.4])
     # hair: non-face head vertices (top/back/sides) + front vertices that land on parsed hair
@@ -80,7 +80,7 @@ def projection_npz(dump, T_model_to_ref, labels, filled, ref_shape, out_path, re
     hv = hair.astype(float)
     for _ in range(12): hv = 0.5 * hv + 0.5 * (Adj @ hv) / deg
     hv *= ~dump["helper"]
-    hair = hv
+    hair = hv if with_hair else np.zeros(n)
     np.savez_compressed(out_path, proj_uv=uv, mask=m.astype(np.float32), skin_rgb=skin_rgb, hair=hair,
                         normals=nrm, co=co, tris=dump["tris"])
     return out_path, dict(face_vertices=int((m > 0.5).sum()), hair_vertices=int((hair > 0.5).sum()))

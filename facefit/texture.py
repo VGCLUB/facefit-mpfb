@@ -132,3 +132,81 @@ def recolor_eye_texture(template_path, ref_bgr, labels, out_path, iris_scale=1.0
         out = np.dstack([out, tpl[..., 3]])
     cv2.imwrite(out_path, out)
     return dict(path=out_path, iris_hsv=[float(x) for x in c])
+
+
+def _template_irises(tpl_bgr):
+    hsv = cv2.cvtColor(tpl_bgr, cv2.COLOR_BGR2HSV)
+    m = ((hsv[..., 1] > 90) & (hsv[..., 2] > 25)).astype(np.uint8)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+    n, cc, st, cen = cv2.connectedComponentsWithStats(m)
+    idx = np.argsort(st[1:, 4])[::-1][:2] + 1
+    return [(cen[i], np.sqrt(st[i, 4] / np.pi)) for i in idx]
+
+
+def _photo_iris_disc(ref, lm, c_id, ring, labels, out_r):
+    c = lm[c_id, :2]; r = float(np.mean([np.linalg.norm(lm[k, :2] - c) for k in ring]))
+    R = int(np.ceil(r * 1.08))
+    x0, y0 = int(c[0]) - R, int(c[1]) - R
+    crop = ref[y0:y0 + 2 * R, x0:x0 + 2 * R].astype(np.float32)
+    lab = labels[y0:y0 + 2 * R, x0:x0 + 2 * R]
+    yy, xx = np.mgrid[0:2 * R, 0:2 * R]; d = np.hypot(xx - (c[0] - x0), yy - (c[1] - y0))
+    L = cv2.cvtColor(crop.astype(np.uint8), cv2.COLOR_BGR2LAB)[..., 0]
+    vis = (d <= r * 1.02) & np.isin(lab, [4, 5])
+    vis &= ~((L < np.percentile(L[vis], 8)) & (d > r * 0.45)) if vis.sum() > 20 else vis   # drop lash shadows outside pupil
+    # polar fill: missing angles take the per-radius median of visible samples
+    A = 360; RR = 2 * R
+    pol = cv2.warpPolar(crop, (RR, A), (c[0] - x0, c[1] - y0), R, cv2.WARP_POLAR_LINEAR)
+    pm = cv2.warpPolar(vis.astype(np.float32), (RR, A), (c[0] - x0, c[1] - y0), R, cv2.WARP_POLAR_LINEAR) > 0.5
+    for j in range(RR):
+        ok = pm[:, j]
+        if ok.sum() >= 3:
+            med = np.median(pol[ok, j], 0); pol[~ok, j] = med
+        elif j > 0:
+            pol[:, j] = pol[:, j - 1]
+    # light angular smoothing of filled area
+    disc = cv2.warpPolar(pol, (2 * R, 2 * R), (R, R), R, cv2.WARP_POLAR_LINEAR | cv2.WARP_INVERSE_MAP)
+    s = out_r / r
+    disc = cv2.resize(disc, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
+    return disc, r, float(vis.mean())
+
+
+def photo_iris_texture(template_path, ref, lm, labels, out_path):
+    """Replace the template irises with the photo's irises (eyelid-occluded parts filled by polar symmetry)."""
+    tpl = cv2.imread(template_path, cv2.IMREAD_UNCHANGED)
+    bgr = tpl[..., :3].copy().astype(np.float32)
+    irs = _template_irises(tpl[..., :3])
+    info = {}
+    for k, ((tc, tr), (cid, ring)) in enumerate(zip(irs, ((468, range(469, 473)), (473, range(474, 478))))):
+        out_r = tr * 1.12
+        disc, r, vis = _photo_iris_disc(ref, lm, cid, ring, labels, out_r)
+        h_, w_ = disc.shape[:2]
+        x0, y0 = int(round(tc[0] - w_ / 2)), int(round(tc[1] - h_ / 2))
+        yy, xx = np.mgrid[0:h_, 0:w_]; d = np.hypot(xx - w_ / 2, yy - h_ / 2)
+        a = np.clip((out_r - d) / (0.08 * out_r), 0, 1)[..., None]
+        sub = bgr[y0:y0 + h_, x0:x0 + w_]
+        bgr[y0:y0 + h_, x0:x0 + w_] = sub * (1 - a) + disc[:sub.shape[0], :sub.shape[1]] * a
+        info[f"iris{k}"] = dict(photo_radius_px=r, visible_fraction=vis, template_radius=float(tr))
+    out = bgr.astype(np.uint8)
+    if tpl.shape[2] == 4: out = np.dstack([out, tpl[..., 3]])
+    cv2.imwrite(out_path, out)
+    info["path"] = out_path
+    return info
+
+
+def lash_mask(ref, lm, labels, out_path):
+    """Photo-space soft mask of dark eyelash pixels around the eyes (composited onto eyeballs)."""
+    L = cv2.cvtColor(ref, cv2.COLOR_BGR2LAB)[..., 0].astype(np.float32)
+    eye = np.isin(labels, [4, 5]).astype(np.uint8)
+    iod = np.linalg.norm(lm[33, :2] - lm[263, :2])
+    k = max(3, int(iod * 0.04))
+    zone = cv2.dilate(eye, np.ones((3 * k, 3 * k), np.uint8)) - cv2.erode(eye, np.ones((k, k), np.uint8))
+    iris = np.zeros_like(eye)
+    for c, ring in ((468, range(469, 473)), (473, range(474, 478))):
+        r = np.mean([np.linalg.norm(lm[j, :2] - lm[c, :2]) for j in ring])
+        cv2.circle(iris, tuple(int(v) for v in lm[c, :2]), int(r * 1.05), 1, -1)
+    bh = cv2.morphologyEx(L.astype(np.uint8), cv2.MORPH_BLACKHAT, np.ones((k, k), np.uint8)).astype(np.float32)
+    Lskin = np.median(L[labels == 1]) if (labels == 1).any() else 180
+    m = np.clip((0.55 * Lskin - L) / 20, 0, 1) * (zone > 0) * (iris == 0)
+    m = cv2.GaussianBlur(m, (0, 0), 0.8)
+    cv2.imwrite(out_path, (m * 255).astype(np.uint8))
+    return out_path

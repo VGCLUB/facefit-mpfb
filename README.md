@@ -82,6 +82,22 @@ Stylisation: `auto_fit(style={"eye-scale-decr-incr": 0.2, "chin-triangle": 0.4})
 
 The textured-render check is biased, because the texture is the photo itself.
 
+## Phase 4 (v0.4): full-head / bald references
+`scripts/e2e_bald.py your_bald.jpg`
+- **Parsing crop**: BiSeNet runs on a larger crop (2.2×, shifted up) so the whole skull is segmented.
+- **Full-head refine** (`vertex_refine(full_head=True)`, auto when no hair is parsed):
+  - Polar silhouette matching every 3° against the parsed head mask (skull, forehead, ears, jaw), plus neck-width rows.
+  - Two stages: a smooth 2D silhouette field applied to the whole head, then a local 3D landmark residual field.
+  - Cranium depth is stretched with its height so the dome stays round.
+- **Eyes**:
+  - The photo's irises are pasted into the eye texture; eyelid-occluded parts are filled by polar symmetry.
+  - Cornea shells are removed, and eyeball specular is kept low under the soft key light.
+  - `calibrate_eyes` scales and moves the eyeballs from MediaPipe iris landmarks measured on a render.
+  - Eyelashes come from a photo lash mask composited onto the eyeballs through camera projection.
+- **Soft frontal lighting** on a grey background (`render_textured(light="soft")`, the default).
+- **Metrics**: `silhouette_iou`.
+- **Ears**: `ear-flap` is set to 1.0 by hand. Ears in a frontal photo appear face-on, but they are not visible in the landmarks.
+
 ## Limitations / TODO
 - Depth only comes from MediaPipe's monocular z, which is weak on stylised CG faces, so the gain is small (16.0→14.4 %IOD). A profile reference or a 3D face prior would do better.
 - Correspondences come from MediaPipe run on a clay render of the default MPFB head (about 4 px reprojection error at 1024 px). Jaw-contour points are silhouette-dependent and only approximate.

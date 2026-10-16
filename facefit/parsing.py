@@ -11,12 +11,12 @@ CLASSES = ["background", "skin", "l_brow", "r_brow", "l_eye", "r_eye", "eye_g", 
 REGIONS = {"skin": [1, 10, 7, 8, 14], "brows": [2, 3], "eyes": [4, 5], "lips": [12, 13], "mouth": [11], "hair": [17, 18]}
 
 
-def parse(image_bgr, landmarks_px=None, size=512):
+def parse(image_bgr, landmarks_px=None, size=512, scale=1.6, shift_up=0.0):
     import onnxruntime as ort
     H, W = image_bgr.shape[:2]
     if landmarks_px is not None:  # square crop around the face
         p = np.asarray(landmarks_px)[:, :2]
-        c = (p.min(0) + p.max(0)) / 2; s = (p.max(0) - p.min(0)).max() * 1.6
+        c = (p.min(0) + p.max(0)) / 2; s = (p.max(0) - p.min(0)).max() * scale; c[1] -= shift_up * s
         x0, y0 = int(max(c[0] - s / 2, 0)), int(max(c[1] - s / 2, 0))
         x1, y1 = int(min(c[0] + s / 2, W)), int(min(c[1] + s / 2, H))
     else:

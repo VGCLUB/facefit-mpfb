@@ -210,7 +210,7 @@ class FaceFitSession:
         if getattr(self, "_labels", None) is None or self._labels_for != self.ref_image:
             import cv2
             from . import parsing
-            self._labels = parsing.parse(cv2.imread(self.ref_image), self.ref["landmarks_px"]); self._labels_for = self.ref_image
+            self._labels = parsing.parse(cv2.imread(self.ref_image), self.ref["landmarks_px"], scale=2.2, shift_up=0.12); self._labels_for = self.ref_image
         return self._labels
 
     def fit_macros(self, candidates=None, depth_weight=0.3):
@@ -231,23 +231,26 @@ class FaceFitSession:
         fit = self.auto_fit(depth_weight=depth_weight)
         return dict(best=best, tried=[dict(err=e, **c) for e, c in res], fit_error=fit["error_after"])
 
-    def vertex_refine(self, passes=2, strength=1.0, contour=True):
+    def vertex_refine(self, passes=2, strength=1.0, contour=True, full_head=None):
         """Per-vertex smooth symmetric deformation (shape key 'facefit_refine') to match landmarks + parsed jaw contour."""
         from . import refine as R
         self.push_undo()
         self.bl.call("remove_keys", prefix="facefit_refine")
         before = self.get_landmark_error()
+        if full_head is None:   # auto: whole head visible if almost no hair is parsed
+            lab = self.labels(); full_head = (lab == 17).sum() < 0.02 * (lab == 1).sum()
         total = None; infos = []
         npy = os.path.join(self.workdir, "refine_delta.npy")
         for k in range(passes):
             d = self.dump()
             delta, info = R.compute_refine(d, self.vids, self.ref2d(), self.T_model_to_ref(), self.labels(),
-                                           np.array(self.ref["landmarks_px"]), strength=strength, contour=contour)
+                                           np.array(self.ref["landmarks_px"]), strength=strength, contour=contour,
+                                           full_head=full_head)
             total = delta if total is None else total + delta
             np.save(npy, total); self.bl.call("set_delta_key", name="facefit_refine", npy_path=npy, value=1.0)
             infos.append(info)
         after = self.get_landmark_error()
-        return dict(error_before=before, error_after=after, passes=infos)
+        return dict(error_before=before, error_after=after, passes=infos, full_head=bool(full_head))
 
     def add_style_keys(self):
         d = self.dump(); co = d["basis"]
@@ -272,17 +275,90 @@ class FaceFitSession:
         try: self.bl.call("add_eyes")
         except Exception as e: pass
         ref = cv2.imread(self.ref_image); labels = self.labels()
-        clean, filled = v3.clean_photo(ref, labels, os.path.join(outdir, "photo_clean.png"), delight=delight)
+        lab = labels; full = (lab == 17).sum() < 0.02 * (lab == 1).sum()
+        from . import refine as R
+        clean, filled = v3.clean_photo(ref, labels, os.path.join(outdir, "photo_clean.png"), delight=delight,
+                                       band=7 if full else 25, label_set=R.HEAD_LABELS if full else None)
         d = self.dump()
-        npz, info = v3.projection_npz(d, self.T_model_to_ref(), labels, filled, ref.shape, os.path.join(outdir, "proj.npz"), ref)
+        npz, info = v3.projection_npz(d, self.T_model_to_ref(), labels, filled, ref.shape, os.path.join(outdir, "proj.npz"), ref, with_hair=hair_cap)
         self.bl.call("setup_face_projection", npz_path=npz, photo_path=clean)
         tpl = os.path.join(os.path.expanduser("~"), ".config/blender/4.2/extensions/.user/user_default/mpfb/data/eyes/materials/brown_eye.png")
         if os.path.exists(tpl):
-            eye = texture.recolor_eye_texture(tpl, ref, labels, os.path.join(outdir, "eyes_iris_recolored.png"))
-            self.bl.call("apply_eye_texture", path=eye["path"])
+            try:
+                eye = texture.photo_iris_texture(tpl, ref, np.array(self.ref["landmarks_px"]), labels,
+                                                 os.path.join(outdir, "eyes_iris_photo.png"))
+            except Exception as e:
+                eye = texture.recolor_eye_texture(tpl, ref, labels, os.path.join(outdir, "eyes_iris_recolored.png"))
+                eye["fallback_reason"] = str(e)
+            lash = texture.lash_mask(ref, np.array(self.ref["landmarks_px"]), labels, os.path.join(outdir, "lash_mask.png"))
+            self._eye_mat = dict(iris_tex=eye["path"], photo=clean, lash_mask=lash, W=int(ref.shape[1]), H=int(ref.shape[0]))
+            self.refresh_eye_material()
+            info["eyes"] = {k: v for k, v in eye.items() if k != "path"}
         if hair_cap: info["hair_cap"] = self.bl.call("make_hair_cap", npz_path=npz)
         info["photo_clean"] = clean
         return info
+
+    def refresh_eye_material(self):
+        if getattr(self, "_eye_mat", None):
+            self.bl.call("setup_eye_material", T=self.T_model_to_ref().tolist(), **self._eye_mat)
+
+    def calibrate_eyes(self, rounds=2, res=768):
+        """Scale/move eyeballs so iris size & centre in a render match the photo (MediaPipe iris landmarks)."""
+        from .landmarks import detect
+        lm = np.array(self.ref["landmarks_px"])[:, :2]
+        def iris(l):
+            out = []
+            for c, ring in ((468, range(469, 473)), (473, range(474, 478))):
+                out.append((l[c], np.mean([np.linalg.norm(l[k] - l[c]) for k in ring])))
+            return out
+        ref_iris = iris(lm); ref_iod = self.ref_iod()
+        hist = []
+        tot_s, tot_d = [1.0, 1.0], [np.zeros(2), np.zeros(2)]
+        for r in range(rounds):
+            p = os.path.join(self.workdir, f"_eyecal_{r}.png")
+            self.render_textured(p, res=res, samples=8)
+            det = detect(p)
+            if det is None: hist.append("mediapipe failed on render"); break
+            l2 = np.array(det["landmarks_px"])[:, :2]
+            # similarity render->ref from the fitting subset
+            T = F.umeyama2d(l2[self.mp_ids], lm[self.mp_ids], self.weights)
+            s = np.sqrt(abs(np.linalg.det(T[:, :2])))
+            ren_iris = iris(l2)
+            rec = {}
+            for k in range(2):
+                (cr, rr), (cm, rm) = ref_iris[k], ren_iris[k]
+                cm_ref = F.apply(T, cm[None])[0]
+                scale = float(np.clip(rr / max(rm * s, 1e-6), 0.8, 1.25))
+                d_ref = cr - cm_ref                                   # ref pixels
+                d_model = d_ref / self.ref_px_per_model()            # model plane units
+                tot_s[k] *= scale; tot_d[k] = tot_d[k] + d_model
+                rec[f"eye{k}"] = dict(iris_ratio_ref=rr / ref_iod, iris_ratio_render=rm * s / ref_iod, scale=scale,
+                                      center_err_px=float(np.linalg.norm(d_ref)))
+            self.bl.call("adjust_eyes", scales=tot_s, offsets=[d.tolist() for d in tot_d],
+                         centers_px=[ren_iris[0][0].tolist(), ren_iris[1][0].tolist()], res=res)
+            hist.append(rec)
+        self.refresh_eye_material()
+        return hist
+
+    def warp_to_ref(self, render_path, out_path, res=768, bg=(150, 150, 150)):
+        """Warp a front render (FaceFitCam framing) into the reference image frame for side-by-side comparison."""
+        import cv2
+        m2d = np.array(self.bl.call("project_vertices", vertex_ids=self.vids, res=res))
+        T = F.umeyama2d(m2d, self.ref2d(), self.weights)
+        ref = cv2.imread(self.ref_image); img = cv2.imread(render_path)
+        img = cv2.resize(img, (res, res))
+        cv2.imwrite(out_path, cv2.warpAffine(img, T, (ref.shape[1], ref.shape[0]), flags=cv2.INTER_CUBIC,
+                                             borderMode=cv2.BORDER_REPLICATE))
+        return out_path
+
+    def silhouette_iou(self, out_png=None):
+        import cv2
+        from . import refine as R
+        return R.silhouette_iou(self.dump(), self.T_model_to_ref(), self.labels(), self.ref["landmarks_px"][152][1],
+                                out_png, cv2.imread(self.ref_image))
+
+    def ref_px_per_model(self):
+        return float(np.sqrt(abs(np.linalg.det(self.T_model_to_ref()[:, :2]))))
 
     def export_model(self, path, fmt=None):
         path = os.path.abspath(path); fmt = fmt or os.path.splitext(path)[1][1:]

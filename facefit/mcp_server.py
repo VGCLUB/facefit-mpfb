@@ -43,7 +43,7 @@ def new_human(gender: float = 0.5, age: float = 0.5, asian: float | None = None)
 @mcp.tool()
 def auto_fit(reg: float = 0.005, params: list[str] | None = None, style: dict[str, float] | None = None,
              locked: dict[str, float] | None = None, depth_weight: float = 0.3, fit_macros: bool = False,
-             vertex_refine: bool = False, refine_passes: int = 2) -> dict:
+             vertex_refine: bool = False, refine_passes: int = 2, full_head: bool | None = None) -> dict:
     """Solve MPFB face sliders (bounded least squares) to match reference landmarks.
     reg: ridge strength (higher = closer to default face). params: subset of slider names (default: ~48 frontal face sliders).
     style: offsets applied after fitting, e.g. {"eye-scale-decr-incr": 0.2, "chin-triangle": 0.4} for a more stylised look.
@@ -51,13 +51,14 @@ def auto_fit(reg: float = 0.005, params: list[str] | None = None, style: dict[st
     depth_weight: weight of MediaPipe z depth residuals (0 = 2D only); enables nose/chin/mouth depth sliders.
     fit_macros: first search female/young MPFB macro presets (gender/age/ethnicity) and keep the best.
     vertex_refine: after sliders, add a smooth symmetric per-vertex deformation (shape key 'facefit_refine') that
-    matches landmarks and the face-parsing jaw contour exactly (for likeness beyond slider range)."""
+    matches landmarks and the face-parsing jaw contour exactly (for likeness beyond slider range).
+    full_head: also fit skull/forehead/ear outline + neck width (auto when no hair is parsed, e.g. bald references)."""
     out = {}
     if fit_macros:
         out["macros"] = S().fit_macros(depth_weight=depth_weight)
     out["sliders"] = S().auto_fit(params=params, reg=reg, style=style, locked=locked, depth_weight=depth_weight)
     if vertex_refine:
-        r = S().vertex_refine(passes=refine_passes)
+        r = S().vertex_refine(passes=refine_passes, full_head=full_head)
         out["vertex_refine"] = {"error_after": r["error_after"], "passes": r["passes"]}
         out["style_keys"] = S().add_style_keys()
     return out
@@ -129,10 +130,27 @@ def project_texture(outdir: str | None = None, add_eyes: bool = True) -> dict:
 
 @mcp.tool()
 def project_face_photo(hair_cap: bool = True, delight: float = 0.3) -> dict:
+    """hair_cap=False for bald references."""
+    return S().project_face(hair_cap=hair_cap, delight=delight)
+
+
+def _unused_project_face_photo(hair_cap: bool = True, delight: float = 0.3) -> dict:
     """Phase-3 likeness texture: cleaned frontal photo (hair strands/earrings inpainted, mild de-lighting) camera-projected
     onto the fitted mesh with a dedicated per-vertex UV (native photo resolution), feathered into body skin colour.
     Adds MakeHuman eyes (iris recoloured) and a simple hair cap with long side curtains. Run after auto_fit(vertex_refine=True)."""
     return S().project_face(hair_cap=hair_cap, delight=delight)
+
+
+@mcp.tool()
+def calibrate_eyes(rounds: int = 2) -> dict:
+    """Scale/move the eyeballs so iris size and centre in a render match the photo (MediaPipe iris landmarks)."""
+    return {"history": S().calibrate_eyes(rounds=rounds)}
+
+
+@mcp.tool()
+def silhouette_iou() -> dict:
+    """IoU of projected head mesh vs parsed head mask (face+ears) above the chin line."""
+    return {"iou": S().silhouette_iou()}
 
 
 @mcp.tool()
